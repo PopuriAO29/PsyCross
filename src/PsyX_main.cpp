@@ -616,7 +616,7 @@ void PsyX_Initialise(char* appName, int width, int height, int fullscreen)
 	}
 #endif
 
-	eprintinfo("Initialising Psy-X %d.%d\n", PSYX_MAJOR_VERSION, PSYX_MINOR_VERSION);
+	eprintinfo("Initializing Psy-X %d.%d\n", PSYX_MAJOR_VERSION, PSYX_MINOR_VERSION);
 	eprintinfo("Build date: %s:%s\n", PSYX_COMPILE_DATE, PSYX_COMPILE_TIME);
 
 #if defined(__EMSCRIPTEN__)
