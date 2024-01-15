@@ -20,11 +20,12 @@
 #define GET_CLUT_X(clut)        ((clut & 0x3F) << 4)
 #define GET_CLUT_Y(clut)        (clut >> 6)
 
-OT_TAG prim_terminator = { -1, 0 }; // P_TAG with zero length
+OT_TAG prim_terminator = { -1, 0 }; // P_TAG with zero primLength
 
 DISPENV activeDispEnv;
 DRAWENV activeDrawEnv;
 
+static const char* currentSplitDebugText = nullptr;
 TextureID overrideTexture = 0;
 int overrideTextureWidth = 0;
 int overrideTextureHeight = 0;
@@ -46,16 +47,21 @@ struct GPUDrawSplit
 
 	u_short			startVertex;
 	u_short			numVerts;
+
+	const char*		debugText;
 };
 
-GrVertex g_vertexBuffer[MAX_NUM_POLY_BUFFER_VERTICES];
-GPUDrawSplit g_splits[MAX_NUM_INDEX_BUFFERS];
+#define MAX_DRAW_SPLITS	 4096
+
+GrVertex g_vertexBuffer[MAX_VERTEX_BUFFER_SIZE];
+GPUDrawSplit g_splits[MAX_DRAW_SPLITS];
 
 int g_vertexIndex = 0;
 int g_splitIndex = 0;
 
 void ClearSplits()
 {
+	currentSplitDebugText = nullptr;
 	g_vertexIndex = 0;
 	g_splitIndex = 0;
 	g_splits[0].texFormat = (TexFormat)0xFFFF;
@@ -83,6 +89,8 @@ void DrawEnvOffset(float& ofsX, float& ofsY)
 		int w, h;
 		DrawEnvDimensions(w, h);
 
+		if (w <= 0) w = 1;
+
 		// also make offset in draw dimensions range to prevent flicker
 		ofsX = activeDrawEnv.ofs[0] % w;
 		ofsY = activeDrawEnv.ofs[1] % 256; // HACK: use half of VRAM
@@ -98,7 +106,7 @@ void DrawEnvOffset(float& ofsX, float& ofsY)
 // without clamping
 inline void ScreenCoordsToEmulator(GrVertex* vertex, int count)
 {
-#ifdef USE_PGXP
+#if USE_PGXP
 	float w, h;
 	DrawEnvDimensions(w, h);
 
@@ -165,7 +173,7 @@ void MakeLineArray(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, ushort gteidx)
 		vertex[3].y = vertex[0].y;
 	} // TODO diagonal line alignment
 
-#ifdef USE_PGXP
+#if USE_PGXP
 	vertex[0].scr_h = vertex[1].scr_h = vertex[2].scr_h = vertex[3].scr_h = 0.0f;
 #endif
 
@@ -174,7 +182,7 @@ void MakeLineArray(GrVertex* vertex, VERTTYPE* p0, VERTTYPE* p1, ushort gteidx)
 
 inline void ApplyVertexPGXP(GrVertex* v, VERTTYPE* p, float ofsX, float ofsY, ushort gteidx, int lookupOfs)
 {
-#ifdef USE_PGXP
+#if USE_PGXP
 	uint lookup = PGXP_LOOKUP_VALUE(p[0], p[1]);
 
 	PGXPVData vd;
@@ -285,7 +293,7 @@ void MakeVertexRect(GrVertex* vertex, VERTTYPE* p0, short w, short h, ushort gte
 	vertex[3].x = vertex[0].x + w;
 	vertex[3].y = vertex[0].y;
 
-#ifdef USE_PGXP
+#if USE_PGXP
 	vertex[0].scr_h = vertex[1].scr_h = vertex[2].scr_h = vertex[3].scr_h = 0.0f;
 #endif
 
@@ -537,8 +545,26 @@ void MakeTexcoordQuadZero(GrVertex* vertex, unsigned char dither)
 	vertex[3].clut = 0;
 }
 
-void MakeColourLine(GrVertex* vertex, unsigned char* col0, unsigned char* col1)
+void MakeColourNoShade(GrVertex* vertex, int n)
 {
+	--n;
+	while (n >= 0)
+	{
+		vertex[n].r = 128;
+		vertex[n].g = 128;
+		vertex[n].b = 128;
+		vertex[n].a = 255;
+		--n;
+	}
+}
+
+void MakeColourLine(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1)
+{
+	if (!shadeTexOn)
+	{
+		MakeColourNoShade(vertex, 4);
+		return;
+	}
 	assert(col0);
 	assert(col1);
 
@@ -563,8 +589,14 @@ void MakeColourLine(GrVertex* vertex, unsigned char* col0, unsigned char* col1)
 	vertex[3].a = 255;
 }
 
-void MakeColourTriangle(GrVertex* vertex, unsigned char* col0, unsigned char* col1, unsigned char* col2)
+void MakeColourTriangle(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1, unsigned char* col2)
 {
+	if (!shadeTexOn)
+	{
+		MakeColourNoShade(vertex, 3);
+		return;
+	}
+
 	assert(col0);
 	assert(col1);
 	assert(col2);
@@ -585,8 +617,14 @@ void MakeColourTriangle(GrVertex* vertex, unsigned char* col0, unsigned char* co
 	vertex[2].a = 255;
 }
 
-void MakeColourQuad(GrVertex* vertex, unsigned char* col0, unsigned char* col1, unsigned char* col2, unsigned char* col3)
+void MakeColourQuad(GrVertex* vertex, bool shadeTexOn, unsigned char* col0, unsigned char* col1, unsigned char* col2, unsigned char* col3)
 {
+	if (!shadeTexOn)
+	{
+		MakeColourNoShade(vertex, 4);
+		return;
+	}
+
 	assert(col0);
 	assert(col1);
 	assert(col2);
@@ -635,7 +673,7 @@ void TriangulateQuad()
 
 //------------------------------------------------------------------------------------------------------------------------
 
-void AddSplit(bool semiTrans, bool textured)
+static void AddSplit(bool semiTrans, bool textured)
 {
 	int tpage = activeDrawEnv.tpage;
 	GPUDrawSplit& curSplit = g_splits[g_splitIndex];
@@ -660,21 +698,28 @@ void AddSplit(bool semiTrans, bool textured)
 		curSplit.drawenv.clip.y == activeDrawEnv.clip.y &&
 		curSplit.drawenv.clip.w == activeDrawEnv.clip.w &&
 		curSplit.drawenv.clip.h == activeDrawEnv.clip.h &&
-		curSplit.drawenv.dfe == activeDrawEnv.dfe)
+		curSplit.drawenv.dfe == activeDrawEnv.dfe &&
+		curSplit.debugText == currentSplitDebugText)
 	{
 		return;
 	}
 
 	curSplit.numVerts = g_vertexIndex - curSplit.startVertex;
 
-	GPUDrawSplit& split = g_splits[++g_splitIndex];
+	if (g_splitIndex + 1 >= MAX_DRAW_SPLITS)
+	{
+		eprinterr("MAX_DRAW_SPLITS reached (too many blend modes, texture formats, drawEnv clip rects, dfe switches), expect rendering errors\n");
+		return;
+	}
 
+	GPUDrawSplit& split = g_splits[++g_splitIndex];
 	split.blendMode = blendMode;
 	split.texFormat = texFormat;
 	split.textureId = textureId;
 	split.drawPrimMode = g_DrawPrimMode;
 	split.drawenv = activeDrawEnv;
 	split.dispenv = activeDispEnv;
+	split.debugText = currentSplitDebugText;
 
 	split.drawenv.tw.w = overrideTextureWidth;
 	split.drawenv.tw.h = overrideTextureHeight;
@@ -685,6 +730,9 @@ void AddSplit(bool semiTrans, bool textured)
 
 void DrawSplit(const GPUDrawSplit& split)
 {
+	if(split.debugText)
+		GR_PushDebugLabel(split.debugText);
+
 	GR_SetStencilMode(split.drawPrimMode);	// draw with mask 0x16
 
 	GR_SetTexture(split.textureId, split.texFormat);
@@ -692,12 +740,16 @@ void DrawSplit(const GPUDrawSplit& split)
 	if (split.texFormat == TF_32_BIT_RGBA)
 		GR_SetOverrideTextureSize(split.drawenv.tw.w, split.drawenv.tw.h);
 
-	GR_SetupClipMode(&split.drawenv.clip, split.drawenv.dfe);
-	GR_SetOffscreenState(&split.drawenv.clip, !split.drawenv.dfe);
+	const bool drawOnScreen = split.drawenv.dfe;
+	GR_SetupClipMode(&split.drawenv.clip, drawOnScreen);
+	GR_SetOffscreenState(&split.drawenv.clip, !drawOnScreen);
 
 	GR_SetBlendMode(split.blendMode);
 
 	GR_DrawTriangles(split.startVertex, split.numVerts / 3);
+
+	if (split.debugText)
+		GR_PopDebugLabel();
 }
 
 extern int g_dbg_polygonSelected;
@@ -719,7 +771,7 @@ void DrawAllSplits()
 
 			eprintf("==========================================\n");
 			eprintf("POLYGON: %d\n", g_dbg_polygonSelected);
-#ifdef USE_PGXP
+#if USE_PGXP
 			eprintf("X: %.2f Y: %.2f\n", (float)vert->x, (float)vert->y);
 			eprintf("U: %.2f V: %.2f\n", (float)vert->u, (float)vert->v);
 			eprintf("TP: %d CLT: %d\n", (int)vert->page, (int)vert->clut);
@@ -746,10 +798,9 @@ void DrawAllSplits()
 }
 
 // forward declarations
-int ParsePrimitive(uintptr_t primPtr);
-int ParseLinkedPrimitiveList(uintptr_t packetStart, uintptr_t packetEnd);
+int ParsePrimitive(P_TAG* polyTag);
 
-void ParsePrimitivesToSplits(u_long* p, int singlePrimitive)
+void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive)
 {
 	if (!p)
 		return;
@@ -759,33 +810,49 @@ void ParsePrimitivesToSplits(u_long* p, int singlePrimitive)
 
 	if (singlePrimitive)
 	{
-#if defined(USE_PGXP) && defined(USE_EXTENDED_PRIM_POINTERS)
-		P_TAG* pTag = (P_TAG*)p;
-		pTag->pgxp_index = 0xFFFF;		// force
+		P_TAG* polyTag = reinterpret_cast<P_TAG*>(p);
+#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
+		// force PGXP off
+		polyTag->pgxp_index = 0xFFFF;
 #endif
+		ParsePrimitive(polyTag);
 
-		// single primitive
-		ParsePrimitive((uintptr_t)p);
-		g_splits[g_splitIndex].numVerts = g_vertexIndex - g_splits[g_splitIndex].startVertex;
+		GPUDrawSplit& lastSplit = g_splits[g_splitIndex];
+		lastSplit.numVerts = g_vertexIndex - lastSplit.startVertex;
 	}
 	else
 	{
-		P_TAG* pTag = (P_TAG*)p;
-
-		// P_TAG as primitive list
-		//do
-		while ((uintptr_t)pTag != (uintptr_t)&prim_terminator)
+		// walk OT_TAG linked list
+		for (uintptr_t basePacket = reinterpret_cast<uintptr_t>(p);; basePacket = reinterpret_cast<uintptr_t>(nextPrim(basePacket)))
 		{
-			if (pTag->len > 0)
+			const int tagLength = getlen(basePacket);
+			if (tagLength > 0)
 			{
-				uintptr_t packetEnd = (uintptr_t)pTag + (pTag->len + P_LEN) * sizeof(u_long);
+				if (tagLength > 32)
+				{
+					eprinterr("got invalid tag length %d, code %d\n", tagLength, reinterpret_cast<P_TAG*>(basePacket)->code);
+				}
 
-				int lastSize = ParseLinkedPrimitiveList((uintptr_t)pTag, packetEnd);
-				if (lastSize == -1)
-					break; // safe bailout
+				uintptr_t currentPacket = basePacket;
+				const uintptr_t endPacket = basePacket + (tagLength + P_LEN) * sizeof(u_int);
+				int primLength = 0;
+				while (currentPacket < endPacket)
+				{
+					primLength = ParsePrimitive(reinterpret_cast<P_TAG*>(currentPacket));
+					currentPacket += (primLength + P_LEN) * sizeof(u_int);
+				}
+
+				if (currentPacket != endPacket)
+				{
+					eprinterr("did not output valid primitive or ptag length is not valid (diff=%d)\n", endPacket-currentPacket);
+				}
 			}
 
-			pTag = (P_TAG*)pTag->addr;
+			GPUDrawSplit& lastSplit = g_splits[g_splitIndex];
+			lastSplit.numVerts = g_vertexIndex - lastSplit.startVertex;
+
+			if (isendprim(basePacket))
+				break;
 		}
 	}
 }
@@ -800,219 +867,36 @@ inline int IsNull(POLY_FT3* poly)
 		poly->y2 == -1;
 }
 
-// parses primitive and pushes it to VBO
-// returns primitive size
-// -1 means invalid primitive
-int ParsePrimitive(uintptr_t primPtr)
+static int ProcessFlatLines(P_TAG* polyTag)
 {
-	P_TAG* pTag = (P_TAG*)primPtr;
-
-	bool semi_transparent = (pTag->code & 2) != 0;
-
-#if defined(USE_PGXP) && defined(USE_EXTENDED_PRIM_POINTERS)
-	unsigned short gte_index = pTag->pgxp_index;
+#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
+	const u_short gteIndex = polyTag->pgxp_index;
 #else
-	unsigned short gte_index = 0xFFFF;
+	const u_short gteIndex = 0xFFFF;
 #endif
 
-	switch (pTag->code & ~3)
+	const bool shadeTexOn = true;
+	const bool semiTrans = (polyTag->code & 2);
+	const int primSubType = polyTag->code & 0x0C;
+
+	switch (primSubType)
 	{
 	case 0x0:
 	{
-		switch (pTag->code)
-		{
-			case 0x01:
-			{
-				DR_MOVE* drmove = (DR_MOVE*)pTag;
+		LINE_F2* poly = (LINE_F2*)polyTag;
 
-				int x, y;
-				y = drmove->code[3] >> 0x10 & 0xFFFF;
-				x = drmove->code[3] & 0xFFFF;
-
-				RECT16 rect;
-				*(ulong*)&rect.x = *(ulong*)&drmove->code[2];
-				*(ulong*)&rect.w = *(ulong*)&drmove->code[4];
-
-				MoveImage(&rect, x, y);
-
-				break;
-			}
-			default:
-			{
-				eprinterr("Unknown command %02X!\n", pTag->code);
-			}
-		}
-
-
-		break;
-	}
-	case 0x20:
-	{
-		POLY_F3* poly = (POLY_F3*)pTag;
-
-		AddSplit(semi_transparent, false);
-
-		MakeVertexTriangle(&g_vertexBuffer[g_vertexIndex], &poly->x0, &poly->x1, &poly->x2, gte_index);
-		MakeTexcoordTriangleZero(&g_vertexBuffer[g_vertexIndex], 0);
-		MakeColourTriangle(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0);
-
-		g_vertexIndex += 3;
-
-#if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
-#endif
-		break;
-	}
-	case 0x24:
-	{
-		POLY_FT3* poly = (POLY_FT3*)pTag;
-		activeDrawEnv.tpage = poly->tpage;
-
-		// It is an official hack from SCE devs to not use DR_TPAGE and instead use null polygon
-		if (!IsNull(poly))
-		{
-			AddSplit(semi_transparent, true);
-
-			MakeVertexTriangle(&g_vertexBuffer[g_vertexIndex], &poly->x0, &poly->x1, &poly->x2, gte_index);
-			MakeTexcoordTriangle(&g_vertexBuffer[g_vertexIndex], &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(lastTpage));
-			MakeColourTriangle(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0);
-
-			g_vertexIndex += 3;
-
-#if defined(DEBUG_POLY_COUNT)
-			polygon_count++;
-#endif
-		}
-
-		break;
-	}
-	case 0x28:
-	{
-		POLY_F4* poly = (POLY_F4*)pTag;
-
-		AddSplit(semi_transparent, false);
-
-		MakeVertexQuad(&g_vertexBuffer[g_vertexIndex], &poly->x0, &poly->x1, &poly->x3, &poly->x2, gte_index);
-		MakeTexcoordQuadZero(&g_vertexBuffer[g_vertexIndex], 0);
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0, &poly->r0);
-
-		TriangulateQuad();
-
-		g_vertexIndex += 6;
-#if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
-#endif
-		break;
-	}
-	case 0x2C:
-	{
-		POLY_FT4* poly = (POLY_FT4*)pTag;
-		activeDrawEnv.tpage = poly->tpage;
-
-		AddSplit(semi_transparent, true);
-
-		MakeVertexQuad(&g_vertexBuffer[g_vertexIndex], &poly->x0, &poly->x1, &poly->x3, &poly->x2, gte_index);
-		MakeTexcoordQuad(&g_vertexBuffer[g_vertexIndex], &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(lastTpage));
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0, &poly->r0);
-
-		TriangulateQuad();
-
-		g_vertexIndex += 6;
-
-#if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
-#endif
-		break;
-	}
-	case 0x30:
-	{
-		POLY_G3* poly = (POLY_G3*)pTag;
-
-		AddSplit(semi_transparent, false);
-
-		MakeVertexTriangle(&g_vertexBuffer[g_vertexIndex], &poly->x0, &poly->x1, &poly->x2, gte_index);
-		MakeTexcoordTriangleZero(&g_vertexBuffer[g_vertexIndex], 1);
-		MakeColourTriangle(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r1, &poly->r2);
-
-		g_vertexIndex += 3;
-
-#if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
-#endif
-		break;
-	}
-	case 0x34:
-	{
-		POLY_GT3* poly = (POLY_GT3*)pTag;
-		activeDrawEnv.tpage = poly->tpage;
-
-		AddSplit(semi_transparent, true);
-
-		MakeVertexTriangle(&g_vertexBuffer[g_vertexIndex], &poly->x0, &poly->x1, &poly->x2, gte_index);
-		MakeTexcoordTriangle(&g_vertexBuffer[g_vertexIndex], &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(lastTpage));
-		MakeColourTriangle(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r1, &poly->r2);
-
-		g_vertexIndex += 3;
-
-#if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
-#endif
-		break;
-	}
-	case 0x38:
-	{
-		POLY_G4* poly = (POLY_G4*)pTag;
-
-		AddSplit(semi_transparent, false);
-
-		MakeVertexQuad(&g_vertexBuffer[g_vertexIndex], &poly->x0, &poly->x1, &poly->x3, &poly->x2, gte_index);
-		MakeTexcoordQuadZero(&g_vertexBuffer[g_vertexIndex], 1);
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r1, &poly->r3, &poly->r2);
-
-		TriangulateQuad();
-
-		g_vertexIndex += 6;
-
-#if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
-#endif
-		break;
-	}
-	case 0x3C:
-	{
-		POLY_GT4* poly = (POLY_GT4*)pTag;
-		activeDrawEnv.tpage = poly->tpage;
-
-		AddSplit(semi_transparent, true);
-
-		MakeVertexQuad(&g_vertexBuffer[g_vertexIndex], &poly->x0, &poly->x1, &poly->x3, &poly->x2, gte_index);
-		MakeTexcoordQuad(&g_vertexBuffer[g_vertexIndex], &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(lastTpage));
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r1, &poly->r3, &poly->r2);
-
-		TriangulateQuad();
-
-		g_vertexIndex += 6;
-
-#if defined(DEBUG_POLY_COUNT)
-		polygon_count++;
-#endif
-		break;
-	}
-	case 0x40:
-	{
-		LINE_F2* poly = (LINE_F2*)pTag;
-
-		AddSplit(semi_transparent, false);
+		AddSplit(semiTrans, false);
 
 		VERTTYPE* p0 = &poly->x0;
 		VERTTYPE* p1 = &poly->x1;
 		unsigned char* c0 = &poly->r0;
 		unsigned char* c1 = c0;
 
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		LineSwapSourceVerts(p0, p1, c0, c1);
-		MakeLineArray(&g_vertexBuffer[g_vertexIndex], p0, p1, gte_index);
-		MakeTexcoordLineZero(&g_vertexBuffer[g_vertexIndex], 0);
-		MakeColourLine(&g_vertexBuffer[g_vertexIndex], c0, c1);
+		MakeLineArray(firstVertex, p0, p1, gteIndex);
+		MakeTexcoordLineZero(firstVertex, 0);
+		MakeColourLine(firstVertex, shadeTexOn, c0, c1);
 
 		TriangulateQuad();
 
@@ -1021,13 +905,13 @@ int ParsePrimitive(uintptr_t primPtr)
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
-		break;
+		return 3;
 	}
-	case 0x48: // TODO (unused)
+	case 0x8: // TODO (unused)
 	{
-		LINE_F3* poly = (LINE_F3*)pTag;
+		LINE_F3* poly = (LINE_F3*)polyTag;
 
-		AddSplit(semi_transparent, false);
+		AddSplit(semiTrans, false);
 
 		{
 			VERTTYPE* p0 = &poly->x0;
@@ -1035,10 +919,11 @@ int ParsePrimitive(uintptr_t primPtr)
 			unsigned char* c0 = &poly->r0;
 			unsigned char* c1 = c0;
 
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 			LineSwapSourceVerts(p0, p1, c0, c1);
-			MakeLineArray(&g_vertexBuffer[g_vertexIndex], p0, p1, gte_index);
-			MakeTexcoordLineZero(&g_vertexBuffer[g_vertexIndex], 0);
-			MakeColourLine(&g_vertexBuffer[g_vertexIndex], c0, c1);
+			MakeLineArray(firstVertex, p0, p1, gteIndex);
+			MakeTexcoordLineZero(firstVertex, 0);
+			MakeColourLine(firstVertex, shadeTexOn, c0, c1);
 
 			TriangulateQuad();
 
@@ -1054,10 +939,11 @@ int ParsePrimitive(uintptr_t primPtr)
 			unsigned char* c0 = &poly->r0;
 			unsigned char* c1 = c0;
 
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 			LineSwapSourceVerts(p0, p1, c0, c1);
-			MakeLineArray(&g_vertexBuffer[g_vertexIndex], p0, p1, gte_index);
-			MakeTexcoordLineZero(&g_vertexBuffer[g_vertexIndex], 0);
-			MakeColourLine(&g_vertexBuffer[g_vertexIndex], c0, c1);
+			MakeLineArray(firstVertex, p0, p1, gteIndex);
+			MakeTexcoordLineZero(firstVertex, 0);
+			MakeColourLine(firstVertex, shadeTexOn, c0, c1);
 
 			TriangulateQuad();
 
@@ -1067,14 +953,14 @@ int ParsePrimitive(uintptr_t primPtr)
 #endif
 		}
 
-		break;
+		return 5;
 	}
-	case 0x4c:
+	case 0xc:
 	{
 		int i;
-		LINE_F4* poly = (LINE_F4*)pTag;
+		LINE_F4* poly = (LINE_F4*)polyTag;
 
-		AddSplit(semi_transparent, false);
+		AddSplit(semiTrans, false);
 
 		{
 			VERTTYPE* p0 = &poly->x0;
@@ -1082,10 +968,11 @@ int ParsePrimitive(uintptr_t primPtr)
 			unsigned char* c0 = &poly->r0;
 			unsigned char* c1 = c0;
 
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 			LineSwapSourceVerts(p0, p1, c0, c1);
-			MakeLineArray(&g_vertexBuffer[g_vertexIndex], p0, p1, gte_index);
-			MakeTexcoordLineZero(&g_vertexBuffer[g_vertexIndex], 0);
-			MakeColourLine(&g_vertexBuffer[g_vertexIndex], c0, c1);
+			MakeLineArray(firstVertex, p0, p1, gteIndex);
+			MakeTexcoordLineZero(firstVertex, 0);
+			MakeColourLine(firstVertex, shadeTexOn, c0, c1);
 
 			TriangulateQuad();
 
@@ -1101,10 +988,11 @@ int ParsePrimitive(uintptr_t primPtr)
 			unsigned char* c0 = &poly->r0;
 			unsigned char* c1 = c0;
 
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 			LineSwapSourceVerts(p0, p1, c0, c1);
-			MakeLineArray(&g_vertexBuffer[g_vertexIndex], p0, p1, gte_index);
-			MakeTexcoordLineZero(&g_vertexBuffer[g_vertexIndex], 0);
-			MakeColourLine(&g_vertexBuffer[g_vertexIndex], c0, c1);
+			MakeLineArray(firstVertex, p0, p1, gteIndex);
+			MakeTexcoordLineZero(firstVertex, 0);
+			MakeColourLine(firstVertex, shadeTexOn, c0, c1);
 
 			TriangulateQuad();
 
@@ -1120,10 +1008,11 @@ int ParsePrimitive(uintptr_t primPtr)
 			unsigned char* c0 = &poly->r0;
 			unsigned char* c1 = c0;
 
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 			LineSwapSourceVerts(p0, p1, c0, c1);
-			MakeLineArray(&g_vertexBuffer[g_vertexIndex], p0, p1, gte_index);
-			MakeTexcoordLineZero(&g_vertexBuffer[g_vertexIndex], 0);
-			MakeColourLine(&g_vertexBuffer[g_vertexIndex], c0, c1);
+			MakeLineArray(firstVertex, p0, p1, gteIndex);
+			MakeTexcoordLineZero(firstVertex, 0);
+			MakeColourLine(firstVertex, shadeTexOn, c0, c1);
 
 			TriangulateQuad();
 
@@ -1133,23 +1022,42 @@ int ParsePrimitive(uintptr_t primPtr)
 #endif
 		}
 
-		break;
+		return 6;
 	}
-	case 0x50:
-	{
-		LINE_G2* poly = (LINE_G2*)pTag;
+	}
+	return 0;
+}
 
-		AddSplit(semi_transparent, false);
+static int ProcessGouraudLines(P_TAG* polyTag)
+{
+#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
+	const u_short gteIndex = polyTag->pgxp_index;
+#else
+	const u_short gteIndex = 0xFFFF;
+#endif
+
+	const bool shadeTexOn = true;
+	const bool semiTrans = (polyTag->code & 2);
+	const int primSubType = polyTag->code & 0x0C;
+
+	switch (primSubType)
+	{
+	case 0x0:
+	{
+		LINE_G2* poly = (LINE_G2*)polyTag;
+
+		AddSplit(semiTrans, false);
 
 		VERTTYPE* p0 = &poly->x0;
 		VERTTYPE* p1 = &poly->x1;
 		unsigned char* c0 = &poly->r0;
 		unsigned char* c1 = &poly->r1;
 
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
 		LineSwapSourceVerts(p0, p1, c0, c1);
-		MakeLineArray(&g_vertexBuffer[g_vertexIndex], p0, p1, gte_index);
-		MakeTexcoordLineZero(&g_vertexBuffer[g_vertexIndex], 0);
-		MakeColourLine(&g_vertexBuffer[g_vertexIndex], c0, c1);
+		MakeLineArray(firstVertex, p0, p1, gteIndex);
+		MakeTexcoordLineZero(firstVertex, 0);
+		MakeColourLine(firstVertex, shadeTexOn, c0, c1);
 
 		TriangulateQuad();
 
@@ -1158,17 +1066,241 @@ int ParsePrimitive(uintptr_t primPtr)
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
-		break;
+		return 4;
 	}
+	case 0x8:
+	{
+		// TODO: LINE_G3
+		return 7;
+	}
+	case 0xC:
+	{
+		// TODO: LINE_G4
+		return 9;
+	}
+	}
+	return 0;
+}
+
+static int ProcessFlatPoly(P_TAG* polyTag)
+{
+#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
+	const u_short gteIndex = polyTag->pgxp_index;
+#else
+	const u_short gteIndex = 0xFFFF;
+#endif
+
+	const bool shadeTexOn = (polyTag->code & 1) == 0;
+	const bool semiTrans = (polyTag->code & 2);
+	const int primSubType = polyTag->code & 0x0C;
+
+	switch (primSubType)
+	{
+	case 0x0:
+	{
+		POLY_F3* poly = (POLY_F3*)polyTag;
+
+		AddSplit(semiTrans, false);
+
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
+		MakeTexcoordTriangleZero(firstVertex, 0);
+		MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
+
+		g_vertexIndex += 3;
+
+#if defined(DEBUG_POLY_COUNT)
+		polygon_count++;
+#endif
+		return 4;
+	}
+	case 0x4:
+	{
+		POLY_FT3* poly = (POLY_FT3*)polyTag;
+		activeDrawEnv.tpage = poly->tpage;
+
+		// It is an official hack from SCE devs to not use DR_TPAGE and instead use null polygon
+		if (!IsNull(poly))
+		{
+			AddSplit(semiTrans, true);
+
+			GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+			MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
+			MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(lastTpage));
+			MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0);
+
+			g_vertexIndex += 3;
+
+#if defined(DEBUG_POLY_COUNT)
+			polygon_count++;
+#endif
+		}
+		return 7;
+	}
+	case 0x8:
+	{
+		POLY_F4* poly = (POLY_F4*)polyTag;
+
+		AddSplit(semiTrans, false);
+
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
+		MakeTexcoordQuadZero(firstVertex, 0);
+		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+
+		TriangulateQuad();
+
+		g_vertexIndex += 6;
+#if defined(DEBUG_POLY_COUNT)
+		polygon_count++;
+#endif
+		return 5;
+	}
+	case 0xC:
+	{
+		POLY_FT4* poly = (POLY_FT4*)polyTag;
+		activeDrawEnv.tpage = poly->tpage;
+
+		AddSplit(semiTrans, true);
+
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
+		MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(lastTpage));
+		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+
+		TriangulateQuad();
+
+		g_vertexIndex += 6;
+
+#if defined(DEBUG_POLY_COUNT)
+		polygon_count++;
+#endif
+		return 9;
+	}
+	}
+	return 0;
+}
+
+static int ProcessGouraudPoly(P_TAG* polyTag)
+{
+#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
+	const u_short gteIndex = polyTag->pgxp_index;
+#else
+	const u_short gteIndex = 0xFFFF;
+#endif
+
+	const bool shadeTexOn = true;
+	const bool semiTrans = (polyTag->code & 2);
+	const int primSubType = polyTag->code & 0x0C;
+
+	switch (primSubType)
+	{
+	case 0x0:
+	{
+		POLY_G3* poly = (POLY_G3*)polyTag;
+
+		AddSplit(semiTrans, false);
+
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
+		MakeTexcoordTriangleZero(firstVertex, 1);
+		MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r2);
+
+		g_vertexIndex += 3;
+
+#if defined(DEBUG_POLY_COUNT)
+		polygon_count++;
+#endif
+		return 6;
+	}
+	case 0x4:
+	{
+		POLY_GT3* poly = (POLY_GT3*)polyTag;
+		activeDrawEnv.tpage = poly->tpage;
+
+		AddSplit(semiTrans, true);
+
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexTriangle(firstVertex, &poly->x0, &poly->x1, &poly->x2, gteIndex);
+		MakeTexcoordTriangle(firstVertex, &poly->u0, &poly->u1, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(lastTpage));
+		MakeColourTriangle(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r2);
+
+		g_vertexIndex += 3;
+
+#if defined(DEBUG_POLY_COUNT)
+		polygon_count++;
+#endif
+		return 9;
+	}
+	case 0x8:
+	{
+		POLY_G4* poly = (POLY_G4*)polyTag;
+
+		AddSplit(semiTrans, false);
+
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
+		MakeTexcoordQuadZero(firstVertex, 1);
+		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
+
+		TriangulateQuad();
+
+		g_vertexIndex += 6;
+
+#if defined(DEBUG_POLY_COUNT)
+		polygon_count++;
+#endif
+		return 8;
+	}
+	case 0xC:
+	{
+		POLY_GT4* poly = (POLY_GT4*)polyTag;
+		activeDrawEnv.tpage = poly->tpage;
+
+		AddSplit(semiTrans, true);
+
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2, gteIndex);
+		MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut, GET_TPAGE_DITHER(lastTpage));
+		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r1, &poly->r3, &poly->r2);
+
+		TriangulateQuad();
+
+		g_vertexIndex += 6;
+
+#if defined(DEBUG_POLY_COUNT)
+		polygon_count++;
+#endif
+		return 12;
+	}
+	}
+	return 0;
+}
+
+static int ProcessTileAndSprt(P_TAG* polyTag)
+{
+#if USE_PGXP && USE_EXTENDED_PRIM_POINTERS
+	const u_short gteIndex = polyTag->pgxp_index;
+#else
+	const u_short gteIndex = 0xFFFF;
+#endif
+
+	// NOTE: TILE does not support switching shadeTex on real PSX
+	const bool shadeTexOn = (polyTag->code & 1) == 0;
+	const bool semiTrans = (polyTag->code & 2);
+
+	switch (polyTag->code & 0xFD)
+	{
 	case 0x60:
 	{
-		TILE* poly = (TILE*)pTag;
+		TILE* poly = (TILE*)polyTag;
 
-		AddSplit(semi_transparent, false);
+		AddSplit(semiTrans, false);
 
-		MakeVertexRect(&g_vertexBuffer[g_vertexIndex], &poly->x0, poly->w, poly->h, gte_index);
-		MakeTexcoordQuadZero(&g_vertexBuffer[g_vertexIndex], 0);
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
+		MakeTexcoordQuadZero(firstVertex, 0);
+		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
 		TriangulateQuad();
 
@@ -1177,18 +1309,18 @@ int ParsePrimitive(uintptr_t primPtr)
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
-
-		break;
+		return 3;
 	}
 	case 0x64:
 	{
-		SPRT* poly = (SPRT*)pTag;
+		SPRT* poly = (SPRT*)polyTag;
 
-		AddSplit(semi_transparent, true);
+		AddSplit(semiTrans, true);
 
-		MakeVertexRect(&g_vertexBuffer[g_vertexIndex], &poly->x0, poly->w, poly->h, gte_index);
-		MakeTexcoordRect(&g_vertexBuffer[g_vertexIndex], &poly->u0, activeDrawEnv.tpage, poly->clut, poly->w, poly->h);
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexRect(firstVertex, &poly->x0, poly->w, poly->h, gteIndex);
+		MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, poly->w, poly->h);
+		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
 		TriangulateQuad();
 
@@ -1197,17 +1329,18 @@ int ParsePrimitive(uintptr_t primPtr)
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
-		break;
+		return 4;
 	}
 	case 0x68:
 	{
-		TILE_1* poly = (TILE_1*)pTag;
+		TILE_1* poly = (TILE_1*)polyTag;
 
-		AddSplit(semi_transparent, false);
+		AddSplit(semiTrans, false);
 
-		MakeVertexRect(&g_vertexBuffer[g_vertexIndex], &poly->x0, 1, 1, gte_index);
-		MakeTexcoordQuadZero(&g_vertexBuffer[g_vertexIndex], 0);
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexRect(firstVertex, &poly->x0, 1, 1, gteIndex);
+		MakeTexcoordQuadZero(firstVertex, 0);
+		MakeColourQuad(firstVertex, true, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
 		TriangulateQuad();
 
@@ -1216,17 +1349,18 @@ int ParsePrimitive(uintptr_t primPtr)
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
-		break;
+		return 2;
 	}
 	case 0x70:
 	{
-		TILE_8* poly = (TILE_8*)pTag;
+		TILE_8* poly = (TILE_8*)polyTag;
 
-		AddSplit(semi_transparent, false);
+		AddSplit(semiTrans, false);
 
-		MakeVertexRect(&g_vertexBuffer[g_vertexIndex], &poly->x0, 8, 8, gte_index);
-		MakeTexcoordQuadZero(&g_vertexBuffer[g_vertexIndex], 0);
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexRect(firstVertex, &poly->x0, 8, 8, gteIndex);
+		MakeTexcoordQuadZero(firstVertex, 0);
+		MakeColourQuad(firstVertex, true, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
 		TriangulateQuad();
 
@@ -1235,17 +1369,18 @@ int ParsePrimitive(uintptr_t primPtr)
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
-		break;
+		return 2;
 	}
 	case 0x74:
 	{
-		SPRT_8* poly = (SPRT_8*)pTag;
+		SPRT_8* poly = (SPRT_8*)polyTag;
 
-		AddSplit(semi_transparent, true);
+		AddSplit(semiTrans, true);
 
-		MakeVertexRect(&g_vertexBuffer[g_vertexIndex], &poly->x0, 8, 8, gte_index);
-		MakeTexcoordRect(&g_vertexBuffer[g_vertexIndex], &poly->u0, activeDrawEnv.tpage, poly->clut, 8, 8);
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexRect(firstVertex, &poly->x0, 8, 8, gteIndex);
+		MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, 8, 8);
+		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
 		TriangulateQuad();
 
@@ -1254,17 +1389,18 @@ int ParsePrimitive(uintptr_t primPtr)
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
-		break;
+		return 3;
 	}
 	case 0x78:
 	{
-		TILE_16* poly = (TILE_16*)pTag;
+		TILE_16* poly = (TILE_16*)polyTag;
 
-		AddSplit(semi_transparent, false);
+		AddSplit(semiTrans, false);
 
-		MakeVertexRect(&g_vertexBuffer[g_vertexIndex], &poly->x0, 16, 16, gte_index);
-		MakeTexcoordQuadZero(&g_vertexBuffer[g_vertexIndex], 0);
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexRect(firstVertex, &poly->x0, 16, 16, gteIndex);
+		MakeTexcoordQuadZero(firstVertex, 0);
+		MakeColourQuad(firstVertex, true, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
 		TriangulateQuad();
 
@@ -1273,17 +1409,18 @@ int ParsePrimitive(uintptr_t primPtr)
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
-		break;
+		return 2;
 	}
 	case 0x7C:
 	{
-		SPRT_16* poly = (SPRT_16*)pTag;
+		SPRT_16* poly = (SPRT_16*)polyTag;
 
-		AddSplit(semi_transparent, true);
+		AddSplit(semiTrans, true);
 
-		MakeVertexRect(&g_vertexBuffer[g_vertexIndex], &poly->x0, 16, 16, gte_index);
-		MakeTexcoordRect(&g_vertexBuffer[g_vertexIndex], &poly->u0, activeDrawEnv.tpage, poly->clut, 16, 16);
-		MakeColourQuad(&g_vertexBuffer[g_vertexIndex], &poly->r0, &poly->r0, &poly->r0, &poly->r0);
+		GrVertex* firstVertex = &g_vertexBuffer[g_vertexIndex];
+		MakeVertexRect(firstVertex, &poly->x0, 16, 16, gteIndex);
+		MakeTexcoordRect(firstVertex, &poly->u0, activeDrawEnv.tpage, poly->clut, 16, 16);
+		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
 		TriangulateQuad();
 
@@ -1292,122 +1429,195 @@ int ParsePrimitive(uintptr_t primPtr)
 #if defined(DEBUG_POLY_COUNT)
 		polygon_count++;
 #endif
-		break;
+		return 3;
 	}
-	case 0xA0:  // DR_LOAD commands
-	{
-		DR_LOAD* drload = (DR_LOAD*)pTag;
-
-		RECT16 rect;
-		*(ulong*)&rect.x = *(ulong*)&drload->code[1];
-		*(ulong*)&rect.w = *(ulong*)&drload->code[2];
-
-		LoadImagePSX(&rect, drload->p);
-		//Emulator_UpdateVRAM();			// FIXME: should it be updated immediately?
-
-		// FIXME: is there othercommands?
-
-		break;
 	}
-	case 0xB0:
+	return 0;
+}
+
+static int ProcessDrawEnv(P_TAG* polyTag)
+{
+	const u_long* codePtr = (u_long*)&polyTag->pad0;
+	int processedLongs = 0;
+	for (int i = 0; i < polyTag->len; ++i)
 	{
-		// [A] Psy-X custom texture packet
-		DR_PSYX_TEX* psytex = (DR_PSYX_TEX*)pTag;
+		const u_long code = codePtr[i];
+		const int primSubType = code >> 24 & 0x0F;
+
+		switch (primSubType)
+		{
+		case 0x1:
+		{
+			// DR_TPAGE
+			activeDrawEnv.tpage = (code & 0x1FF);
+			activeDrawEnv.dtd = (code >> 9) & 1;
+			activeDrawEnv.dfe = (code >> 10) & 1;
+			break;
+		}
+		case 0x2:
+		{
+			// DR_TWIN
+			activeDrawEnv.tw.w = (code & 0x1F);
+			activeDrawEnv.tw.h = ((code >> 5) & 0x1F);
+			activeDrawEnv.tw.x = ((code >> 10) & 0x1F);
+			activeDrawEnv.tw.y = ((code >> 15) & 0x1F);
+			break;
+		}
+		case 0x3:
+		{
+			// DR_AREA
+			activeDrawEnv.clip.x = code & 1023;
+			activeDrawEnv.clip.y = (code >> 10) & 1023;
+			break;
+		}
+		case 0x4:
+		{
+			// DR_AREA (second part)
+			activeDrawEnv.clip.w = code & 1023;
+			activeDrawEnv.clip.h = (code >> 10) & 1023;
+
+			activeDrawEnv.clip.w -= activeDrawEnv.clip.x;
+			activeDrawEnv.clip.h -= activeDrawEnv.clip.y;
+			break;
+		}
+		case 0x5:
+		{
+			// DR_OFFSET
+			// TODO
+			activeDrawEnv.ofs[0] = code & 2047;
+			activeDrawEnv.ofs[1] = (code >> 11) & 2047;
+			break;
+		}
+		case 0x6:
+		{
+			eprintf("Mask setting: %08x\n", code);
+			//MaskSetOR = (*cb & 1) ? 0x8000 : 0x0000;
+			//MaskEvalAND = (*cb & 2) ? 0x8000 : 0x0000;
+			break;
+		}
+		case 0:
+			// proceed to next primitive tag
+			return processedLongs;
+		}
+		++processedLongs;
+	}
+
+	return processedLongs;
+}
+
+static int ProcessPsyXPrims(P_TAG* polyTag)
+{
+	const int primType = polyTag->code & 0xF0;
+	const int primSubType = polyTag->code & 0x0F;
+
+	switch (primSubType)
+	{
+	case 0x01:
+	{
+		DR_PSYX_TEX* psytex = (DR_PSYX_TEX*)polyTag;
 		overrideTexture = psytex->code[0] & 0xFFFFFF;
 		overrideTextureWidth = psytex->code[1] & 0xFFF;
 		overrideTextureHeight = psytex->code[1] >> 16 & 0xFFF;
-		break;
+		return 2;
 	}
-	case 0xE0:  // DR_ENV commands
+	case 0x02:
 	{
-		uint i;
-		DR_ENV* drenv = (DR_ENV*)pTag;
+		// [A] Psy-X custom texture packet
+		DR_PSYX_DBGMARKER* psydbg = (DR_PSYX_DBGMARKER*)polyTag;
+		currentSplitDebugText = psydbg->text;
+		return 2;
+	}
+	}
 
-		// parse each code of the command
-		for (i = 0; i < pTag->len; i++)
+	return 0;
+}
+
+// Processes primitive
+// returns processed primitive primLength in longs
+int ParsePrimitive(P_TAG* polyTag)
+{
+	const int primType = polyTag->code & 0xF0;
+
+	int primLength = 0;
+
+	switch (primType)
+	{
+	case 0x00:
+	{
+		const int primSubType = polyTag->code & 0x0F;
+		if (primSubType == 0x0)
 		{
-			u_long code = drenv->code[i];
-			u_char drcode = code >> 24 & 0xFF;
+			primLength = 3;
+		}
+		else if (primSubType == 0x1)
+		{
+			DR_MOVE* drmove = (DR_MOVE*)polyTag;
 
-			switch (drcode)
-			{
-			case 0xE1:
-			{
-				activeDrawEnv.tpage = (code & 0x1FF);
-				activeDrawEnv.dtd = (code >> 9) & 1;
-				activeDrawEnv.dfe = (code >> 10) & 1;
+			const int y = drmove->code[3] >> 0x10 & 0xFFFF;
+			const int x = drmove->code[3] & 0xFFFF;
 
-				break;
-			}
-			case 0xE2:
-			{
-				activeDrawEnv.tw.w = (code & 0x1F);
-				activeDrawEnv.tw.h = ((code >> 5) & 0x1F);
-				activeDrawEnv.tw.x = ((code >> 10) & 0x1F);
-				activeDrawEnv.tw.y = ((code >> 15) & 0x1F);
-				break;
-			}
-			case 0xE3:
-			{
-				activeDrawEnv.clip.x = code & 1023;
-				activeDrawEnv.clip.y = (code >> 10) & 1023;
-				break;
-			}
-			case 0xE4:
-			{
-				activeDrawEnv.clip.w = code & 1023;
-				activeDrawEnv.clip.h = (code >> 10) & 1023;
+			RECT16 rect;
+			*(ulong*)&rect.x = *(ulong*)&drmove->code[2];
+			*(ulong*)&rect.w = *(ulong*)&drmove->code[4];
 
-				activeDrawEnv.clip.w -= activeDrawEnv.clip.x;
-				activeDrawEnv.clip.h -= activeDrawEnv.clip.y;
-				break;
-			}
-			case 0xE5:
-			{
-				activeDrawEnv.ofs[0] = code & 2047;
-				activeDrawEnv.ofs[1] = (code >> 11) & 2047;
-
-				break;
-			}
-			case 0xE6:
-			{
-				eprintf("Mask setting: %08x\n", code);
-				//MaskSetOR = (*cb & 1) ? 0x8000 : 0x0000;
-				//MaskEvalAND = (*cb & 2) ? 0x8000 : 0x0000;
-				break;
-			}
-			}
+			MoveImage(&rect, x, y);
+			primLength = 5;
 		}
 		break;
 	}
-	default:
-	{
-		//Unhandled poly type
-		eprinterr("Unhandled primitive type: %02X type2:%02X\n", pTag->code, pTag->code & ~3);
+	case 0x20:
+		// Flat polygons
+		primLength = ProcessFlatPoly(polyTag);
 		break;
+	case 0x30:
+		// Gouraud shaded polygons
+		primLength = ProcessGouraudPoly(polyTag);
+		break;
+	case 0x40:
+		// Flat (single colour) Lines
+		primLength = ProcessFlatLines(polyTag);
+		break;
+	case 0x50:
+		// Gouraud lines
+		primLength = ProcessGouraudLines(polyTag);
+		break;
+	case 0x60:
+	case 0x70:
+		// TILE and SPRT
+		primLength = ProcessTileAndSprt(polyTag);
+		break;
+	case 0xA0:
+		// DR_LOAD
+		{
+			DR_LOAD* drload = (DR_LOAD*)polyTag;
+
+			RECT16 rect;
+			*(ulong*)&rect.x = *(ulong*)&drload->code[1];
+			*(ulong*)&rect.w = *(ulong*)&drload->code[2];
+
+			LoadImagePSX(&rect, drload->p);
+			//Emulator_UpdateVRAM();			// FIXME: should it be updated immediately?
+
+			// FIXME: is there othercommands?
+		}
+		primLength = getlen(polyTag);
+		break;
+	case 0xB0:
+		// [A] Psy-X custom primitives
+		primLength = ProcessPsyXPrims(polyTag);
+		break;
+	case 0xE0:
+		// Draw Env setup
+		primLength = ProcessDrawEnv(polyTag);
+		break;
+	//default:
+	//	eprinterr("got %0x primitive\n", primType);
 	}
-	}
 
-	return (pTag->len + P_LEN) * sizeof(long);
-}
-
-int ParseLinkedPrimitiveList(uintptr_t packetStart, uintptr_t packetEnd)
-{
-	uintptr_t currentAddress = packetStart;
-
-	int lastSize = -1;
-
-	while (currentAddress != packetEnd)
+	if(primLength == 0)
 	{
-		lastSize = ParsePrimitive(currentAddress);
-
-		if (lastSize == -1)	// not valid packets submitted
-			break;
-
-		currentAddress += lastSize;
+		eprinterr("Unhandled zero length %0x primitive\n", primType);
 	}
 
-	g_splits[g_splitIndex].numVerts = g_vertexIndex - g_splits[g_splitIndex].startVertex;
-
-	return lastSize;
+	return primLength;
 }

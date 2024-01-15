@@ -5,6 +5,7 @@
 #include "psx/libgpu.h"
 #include "psx/types.h"
 
+#include "PsyX/PsyX_config.h"
 #include "PsyX/common/pgxp_defs.h"
 
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
@@ -19,8 +20,9 @@ extern DRAWENV activeDrawEnv;
 extern int g_GPUDisabledState;
 
 void ClearSplits();
-void ParsePrimitivesToSplits(u_long* p, int singlePrimitive);
 void DrawAllSplits();
+
+extern void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive);
 
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
 }

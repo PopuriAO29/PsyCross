@@ -1,6 +1,8 @@
 #ifndef EMULATOR_H
 #define EMULATOR_H
 
+#include "PsyX/PsyX_config.h"
+
 /*
  * Platform specific emulator setup
  */
@@ -20,6 +22,8 @@
 
 #if defined(RENDERER_OGL) || defined(RENDERER_OGLES)
 #   define USE_OPENGL 1
+#else
+#   define USE_OPENGL 0
 #endif
 
 #if OGLES_VERSION == 2
@@ -95,16 +99,18 @@
 #	define VRAM_INTERNAL_FORMAT   GL_LUMINANCE_ALPHA
 #endif
 
-#define VRAM_WIDTH (1024)
-#define VRAM_HEIGHT (512)
+#define VRAM_WIDTH		(1024)
+#define VRAM_HEIGHT		(512)
 
-#define TPAGE_WIDTH (256)
-#define TPAGE_HEIGHT (256)
+#define TPAGE_WIDTH		(256)
+#define TPAGE_HEIGHT	(256)
+
+#define MAX_VERTEX_BUFFER_SIZE	(1 << (sizeof(ushort) * 8))
 
 #pragma pack(push,1)
 typedef struct
 {
-#if defined(USE_PGXP)
+#if USE_PGXP
 	float		x, y, page, clut;
 	float		z, scr_h, ofsX, ofsY;
 #else
@@ -145,8 +151,6 @@ typedef enum
 	TF_32_BIT_RGBA		// custom texture
 } TexFormat;
 
-#define MAX_NUM_POLY_BUFFER_VERTICES (32768)
-#define MAX_NUM_INDEX_BUFFERS        (4096)
 
 #if defined(RENDERER_OGLES) || defined(RENDERER_OGL)
 typedef uint TextureID;
@@ -197,6 +201,9 @@ extern void			GR_Clear(int x, int y, int w, int h, unsigned char r, unsigned cha
 extern void			GR_ClearVRAM(int x, int y, int w, int h, unsigned char r, unsigned char g, unsigned char b);
 extern void			GR_UpdateVertexBuffer(const GrVertex* vertices, int count);
 extern void			GR_DrawTriangles(int start_vertex, int triangles);
+
+extern void			GR_PushDebugLabel(const char* label);
+extern void			GR_PopDebugLabel();
 
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
 }

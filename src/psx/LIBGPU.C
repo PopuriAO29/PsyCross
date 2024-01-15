@@ -103,7 +103,7 @@ int MargePrim(void* p0, void* p1)
 	return -1;
 #endif //0
 
-#if defined(USE_EXTENDED_PRIM_POINTERS)
+#if USE_EXTENDED_PRIM_POINTERS
 	int v0 = ((int*)p0)[1];
 	int v1 = ((int*)p1)[1];
 #else
@@ -114,13 +114,13 @@ int MargePrim(void* p0, void* p1)
 	v0 += v1;
 	v1 = v0 + 1;
 
-#if defined(USE_EXTENDED_PRIM_POINTERS)
+#if USE_EXTENDED_PRIM_POINTERS
 	if (v1 < 0x12)
 #else
 	if (v1 < 0x11)
 #endif
 	{
-#if defined(USE_EXTENDED_PRIM_POINTERS)
+#if USE_EXTENDED_PRIM_POINTERS
 		((int*)p0)[1] = v1;
 		((int*)p1)[1] = 0;
 #else
@@ -188,18 +188,21 @@ int StoreImage2(RECT16* RECT16, u_long* p)
 
 u_long* ClearOTag(u_long* ot, int n)
 {
+	OT_TAG* ptag_list;
+
 	if (n == 0)
 		return NULL;
+	ptag_list = (OT_TAG*)ot;
 
 	// last is  aspecial terminator
-	setaddr(&ot[n - P_LEN], &prim_terminator);
-	setlen(&ot[n - P_LEN], 0);
+	termPrim(&ptag_list[n-1]);
+	setlen(&ptag_list[n-1], 0);
 
 	// make a linked list with it's next items
-	for (int i = (n - 1) * P_LEN; i >= 0; i -= P_LEN)
+	for (int i = (n-1); i >= 0; --i)
 	{
-		setaddr(&ot[i], &ot[i + P_LEN]);
-		setlen(&ot[i], 0);
+		setaddr(&ptag_list[i], &ptag_list[i+1]);
+		setlen(&ptag_list[i], 0);
 	}
 
 	return NULL;
@@ -207,18 +210,21 @@ u_long* ClearOTag(u_long* ot, int n)
 
 u_long* ClearOTagR(u_long* ot, int n)
 {
+	OT_TAG* ptag_list;
+
 	if (n == 0)
 		return NULL;
+	ptag_list = (OT_TAG*)ot;
 
 	// first is a special terminator
-	setaddr(ot, &prim_terminator);
-	setlen(ot, 0);
+	termPrim(ptag_list);
+	setlen(ptag_list, 0);
 
 	// initialize a linked list with it's previous items
-	for (int i = 1 * P_LEN; i < n * P_LEN; i += P_LEN)
+	for (int i = 1; i < n; ++i)
 	{
-		setaddr(&ot[i], &ot[i - P_LEN]);
-		setlen(&ot[i], 0);
+		setaddr(&ptag_list[i], &ptag_list[i-1]);
+		setlen(&ptag_list[i], 0);
 	}
 
 	return NULL;
@@ -423,7 +429,7 @@ void DrawOTag(u_long* p)
 		//if (activeDrawEnv.isbg)
 		//	ClearImage(&activeDrawEnv.clip, activeDrawEnv.r0, activeDrawEnv.g0, activeDrawEnv.b0);
 
-		ParsePrimitivesToSplits(p, 0);
+		ParsePrimitivesLinkedList(p, 0);
 
 		DrawAllSplits();
 	} while (g_dbg_emulatorPaused);
@@ -445,7 +451,7 @@ void DrawPrim(void* p)
 	//if (activeDrawEnv.isbg)
 	//	ClearImage(&activeDrawEnv.clip, activeDrawEnv.r0, activeDrawEnv.g0, activeDrawEnv.b0);
 
- 	ParsePrimitivesToSplits((u_long*)p, 1);
+ 	ParsePrimitivesLinkedList((u_long*)p, 1);
 }
 
 void SetSprt16(SPRT_16* p)
@@ -789,4 +795,17 @@ void SetPsyXTexture(DR_PSYX_TEX* p, uint grTextureId, int width, int height)
 	setlen(p, 2);
 	p->code[0] = 0xB1000000 | grTextureId;
 	p->code[1] = width | (height << 16);
+}
+
+void SetPsyXDebugMarker(DR_PSYX_DBGMARKER* p, const char* str)
+{
+	setlen(p, 2);
+	p->code = 0xB2000000;
+	p->text = str;
+}
+
+u_long* BreakDraw(void)
+{
+	PSYX_UNIMPLEMENTED();
+	return 0;
 }
