@@ -15,6 +15,7 @@ extern "C" {
 extern OT_TAG prim_terminator; // P_TAG with zero length
 
 extern int g_splitIndex;
+extern DISPENV currentDispEnv;
 extern DISPENV activeDispEnv;
 extern DRAWENV activeDrawEnv;
 extern int g_GPUDisabledState;
@@ -22,7 +23,7 @@ extern int g_GPUDisabledState;
 void ClearSplits();
 void DrawAllSplits();
 
-extern void ParsePrimitivesLinkedList(u_long* p, int singlePrimitive);
+extern void ParsePrimitivesLinkedList(u_int* p, int singlePrimitive);
 
 #if defined(_LANGUAGE_C_PLUS_PLUS)||defined(__cplusplus)||defined(c_plusplus)
 }
