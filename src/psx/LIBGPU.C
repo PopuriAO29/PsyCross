@@ -456,7 +456,7 @@ void DrawPrim(void* p)
 	//if (activeDrawEnv.isbg)
 	//	ClearImage(&activeDrawEnv.clip, activeDrawEnv.r0, activeDrawEnv.g0, activeDrawEnv.b0);
 
- 	ParsePrimitivesLinkedList((u_int*)p, 1);
+ 	ParsePrimitivesLinkedList((u_long*)p, 1);
 }
 
 void SetSprt16(SPRT_16* p)
@@ -509,7 +509,7 @@ void FntLoad(int x, int y)
 	RECT16 pos;
 	TIM_IMAGE tim;
 
-	GetTimInfo((u_int*)dbugfont, &tim);
+	GetTimInfo((u_long*)dbugfont, &tim);
 
 	// Load font image
 	pos = *tim.pRECT16;
@@ -518,7 +518,7 @@ void FntLoad(int x, int y)
 
 	_font_tpage = getTPage(0, 0, pos.x, pos.y);
 
-	LoadImage(&pos, tim.paddr);
+	LoadImage(&pos, (u_long*)tim.paddr);
 	DrawSync(0);
 
 	// Load font clut
@@ -528,7 +528,7 @@ void FntLoad(int x, int y)
 
 	_font_clut = getClut(pos.x, pos.y);
 
-	LoadImage(&pos, tim.caddr);
+	LoadImage(&pos, (u_long*)tim.caddr);
 	DrawSync(0);
 
 	// Clear previously opened text streams
@@ -605,7 +605,7 @@ u_short LoadTPage(u_int* pix, int tp, int abr, int x, int y, int w, int h)
 	}
 
 	//loc_2AC
-	LoadImage(&imageArea, pix);
+	LoadImage(&imageArea, (u_long*)pix);
 	return GetTPage(tp, abr, x, y) & 0xFFFF;
 }
 
@@ -659,7 +659,7 @@ u_long* FntFlush()
 	opri = str->pribuff;
 
 	// Create TPage primitive
-	tp = opri;
+	tp = (DR_TPAGE*)opri;
 	setDrawTPage(tp, 1, 0, _font_tpage);
 
 	// Create a black rectangle background when enabled
