@@ -2,6 +2,7 @@
 #include "../PsyX_main.h"
 #include "../audio/PsyX_SPUAL.h"
 #include "psx/libapi.h"
+#include "psx/libetc.h"
 
 static int s_spu_EVdma = 0;
 static int s_inTransfer = 0;
