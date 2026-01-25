@@ -35,15 +35,22 @@
  /*
   * OpenGL
   */
+
 #if defined (RENDERER_OGL)
 
 #   define GL_GLEXT_PROTOTYPES
+
+#if defined(USE_GLAD)
 #   include "common/glad.h"
+#endif
 
 #elif defined (RENDERER_OGLES)
 
 #   define GL_GLEXT_PROTOTYPES
 
+#if defined(USE_GLAD)
+#   include "common/glad.h"
+#else
 #   ifdef __EMSCRIPTEN__
 #      include <GL/gl.h>
 #   else
@@ -54,6 +61,7 @@
 #          include <GLES3/gl3.h>
 #      endif
 #   endif
+#endif
 
 #   include <EGL/egl.h>
 
